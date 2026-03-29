@@ -6,6 +6,7 @@ import cadquery as cq
 import sys
 from datetime import datetime
 import os
+import base64
 
 load_dotenv()
 
@@ -14,7 +15,6 @@ from cq_gears import SpurGear, RingGear, BevelGear
 
 app = Flask(__name__)
 CORS(app, origins="*")
-
 
 # ===== TEMPLATES =====
 def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_id, thickness):
@@ -27,7 +27,6 @@ def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_
     return result
 # =====================
 
-# 👇 PASTE YOUR GROQ KEY HERE 👇
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 def generate_cad_code(prompt, error=None):
@@ -76,7 +75,10 @@ result = make_connecting_rod(200, 30, 15, 20, 10, 10)
     )
     return response.choices[0].message.content
 
-def build_part(prompt):
+@app.route('/generate', methods=['POST'])
+def generate():
+    data = request.json
+    prompt = data.get('prompt', '')
     error = None
     for attempt in range(3):
         code = generate_cad_code(prompt, error)
@@ -91,32 +93,22 @@ def build_part(prompt):
             exec(code, exec_globals)
             result = exec_globals["result"]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            step_file = f"part_{timestamp}.step"
-            stl_file = f"part_{timestamp}.stl"
             os.makedirs("outputs", exist_ok=True)
-            cq.exporters.export(result, os.path.join("outputs", step_file))
-            cq.exporters.export(result, os.path.join("outputs", stl_file))
-            return step_file, stl_file
+            step_path = f"outputs/part_{timestamp}.step"
+            stl_path = f"outputs/part_{timestamp}.stl"
+            cq.exporters.export(result, step_path)
+            cq.exporters.export(result, stl_path)
+            with open(step_path, "rb") as f:
+                step_b64 = base64.b64encode(f.read()).decode("utf-8")
+            with open(stl_path, "rb") as f:
+                stl_b64 = base64.b64encode(f.read()).decode("utf-8")
+            return jsonify({
+                "step_b64": step_b64,
+                "stl_b64": stl_b64
+            })
         except Exception as e:
             error = str(e)
-    return None, None
-
-@app.route('/generate', methods=['POST'])
-def generate():
-    data = request.json
-    prompt = data.get('prompt', '')
-    step_file, stl_file = build_part(prompt)
-    if step_file:
-        return jsonify({"step_file": step_file, "stl_file": stl_file})
     return jsonify({"error": "Failed after 3 attempts"}), 500
-
-@app.route('/preview/<filename>')
-def preview(filename):
-    return send_file(os.path.join("outputs", filename))
-
-@app.route('/download/<filename>')
-def download(filename):
-    return send_file(os.path.join("outputs", filename), as_attachment=True)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
