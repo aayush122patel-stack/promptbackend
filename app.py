@@ -14,7 +14,6 @@ from groq import Groq
 # ================== ENV ==================
 load_dotenv()
 
-# Add cq_gears to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "cq_gears"))
 from cq_gears import SpurGear, RingGear, BevelGear
 
@@ -34,16 +33,33 @@ DEFAULTS = {
     "washer": {"od": 40, "id": 20, "thickness": 5},
     "nut": {"af": 30, "thickness": 10, "hole_dia": 16},
     "pulley": {"od": 80, "width": 30, "bore": 20},
+    "connecting_rod": {"length": 200, "big_end_od": 30, "big_end_id": 15, "small_end_od": 20, "small_end_id": 10, "thickness": 10},
+    "spur_gear": {"module": 2, "teeth": 20, "width": 30, "bore": 0},
+    "spur_gear_with_bore": {"module": 2, "teeth": 20, "width": 30, "bore": 20},
+    "ring_gear": {"module": 2, "teeth": 40, "width": 30},
+    "bevel_gear": {"module": 2, "teeth": 20, "width": 20},
 }
 
 PART_KEYWORDS = {
-    "cuboid": "cuboid",
-    "block": "cuboid",
+    "connecting rod": "connecting_rod",
+    "conrod": "connecting_rod",
+    "ring gear": "ring_gear",
+    "bevel gear": "bevel_gear",
+    "spur gear": "spur_gear",
+    "gear with bore": "spur_gear_with_bore",
+    "gear with hole": "spur_gear_with_bore",
+    "mechanical gear": "spur_gear_with_bore",
+    "gear": "spur_gear_with_bore",
+    "flange with holes": "flange_holes",
+    "flange with bolt": "flange_holes",
+    "flange": "flange",
     "hollow cylinder": "hollow_cylinder",
     "pipe": "hollow_cylinder",
+    "tube": "hollow_cylinder",
+    "cuboid": "cuboid",
+    "block": "cuboid",
+    "rectangular block": "cuboid",
     "shaft": "shaft",
-    "flange with holes": "flange_holes",
-    "flange": "flange",
     "washer": "washer",
     "nut": "nut",
     "pulley": "pulley",
@@ -52,57 +68,130 @@ PART_KEYWORDS = {
 DIMENSION_PATTERNS = {
     "od": r"(?:outer\s*diameter|od)\s*[:=]?\s*(\d+\.?\d*)",
     "id": r"(?:inner\s*diameter|id)\s*[:=]?\s*(\d+\.?\d*)",
-    "diameter": r"(?:diameter|dia|d)\s*[:=]?\s*(\d+\.?\d*)",
-    "length": r"(?:length|long|l)\s*[:=]?\s*(\d+\.?\d*)",
-    "thickness": r"(?:thickness|thick|t)\s*[:=]?\s*(\d+\.?\d*)",
-    "pcd": r"(?:bolt\s*circle\s*diameter|pcd)\s*[:=]?\s*(\d+\.?\d*)",
-    "holes": r"(?:number\s*of\s*holes|holes)\s*[:=]?\s*(\d+)",
-    "hole_dia": r"(?:hole\s*diameter|hole\s*size|hole_dia)\s*[:=]?\s*(\d+\.?\d*)",
+    "diameter": r"(?:diameter|dia)\s*[:=]?\s*(\d+\.?\d*)",
+    "length": r"(?:length|long)\s*[:=]?\s*(\d+\.?\d*)",
+    "thickness": r"(?:thickness|thick)\s*[:=]?\s*(\d+\.?\d*)",
+    "pcd": r"(?:bolt\s*circle\s*diameter|bcd|pcd)\s*[:=]?\s*(\d+\.?\d*)",
+    "holes": r"(\d+)\s*(?:bolt\s*holes|holes)",
+    "hole_dia": r"(?:hole\s*diameter|hole\s*dia)\s*[:=]?\s*(\d+\.?\d*)",
     "af": r"(?:across\s*flats|af)\s*[:=]?\s*(\d+\.?\d*)",
-    "width": r"(?:width|w)\s*[:=]?\s*(\d+\.?\d*)",
-    "bore": r"(?:bore|inner\s*hole)\s*[:=]?\s*(\d+\.?\d*)",
-    "height": r"(?:height|h)\s*[:=]?\s*(\d+\.?\d*)",
+    "width": r"(?:width|wide)\s*[:=]?\s*(\d+\.?\d*)",
+    "bore": r"(?:bore|inner\s*hole|bore\s*diameter)\s*[:=]?\s*(\d+\.?\d*)",
+    "height": r"(?:height|tall)\s*[:=]?\s*(\d+\.?\d*)",
+    "big_end_od": r"big\s*end\s*(?:od|outer|diameter)\s*[:=]?\s*(\d+\.?\d*)",
+    "big_end_id": r"big\s*end\s*(?:id|inner|bore)\s*[:=]?\s*(\d+\.?\d*)",
+    "small_end_od": r"small\s*end\s*(?:od|outer|diameter)\s*[:=]?\s*(\d+\.?\d*)",
+    "small_end_id": r"small\s*end\s*(?:id|inner|bore)\s*[:=]?\s*(\d+\.?\d*)",
+    "module": r"module\s*[:=]?\s*(\d+\.?\d*)",
+    "teeth": r"(\d+)\s*teeth",
 }
 
+# ================== VALIDATIONS ==================
+def validate_hollow(od, id, label="Part"):
+    if id >= od:
+        raise ValueError(f"{label}: Inner diameter ({id}mm) must be less than outer diameter ({od}mm)")
+
+def validate_positive(*args):
+    for name, val in args:
+        if val <= 0:
+            raise ValueError(f"{name} must be greater than 0, got {val}")
+
+def validate_flange_holes(od, pcd, hole_dia):
+    if pcd/2 + hole_dia/2 >= od/2:
+        raise ValueError(f"Bolt holes extend beyond flange outer diameter. Reduce PCD or hole diameter.")
+
+def validate_gear_bore(gear_od, bore):
+    if bore > 0 and bore >= gear_od:
+        raise ValueError(f"Bore diameter ({bore}mm) must be smaller than gear outer diameter ({gear_od}mm)")
+
 # ================== TEMPLATE FUNCTIONS ==================
-def make_cuboid(L, W, H):
-    return cq.Workplane("XY").box(L, W, H)
+def make_cuboid(length, width, height):
+    validate_positive(("length", length), ("width", width), ("height", height))
+    return cq.Workplane("XY").box(length, width, height)
 
 def make_hollow_cylinder(od, id, height):
+    validate_positive(("od", od), ("id", id), ("height", height))
+    validate_hollow(od, id, "Hollow cylinder")
     result = cq.Workplane("XY").circle(od/2).extrude(height)
     result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
     return result
 
 def make_shaft(length, diameter):
+    validate_positive(("length", length), ("diameter", diameter))
     return cq.Workplane("XY").circle(diameter/2).extrude(length)
 
 def make_flange(od, id, thickness):
+    validate_positive(("od", od), ("id", id), ("thickness", thickness))
+    validate_hollow(od, id, "Flange")
     result = cq.Workplane("XY").circle(od/2).extrude(thickness)
     result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
     return result
 
 def make_flange_with_holes(od, id, thickness, pcd, holes, hole_dia):
+    validate_positive(("od", od), ("id", id), ("thickness", thickness), ("pcd", pcd), ("holes", holes), ("hole_dia", hole_dia))
+    validate_hollow(od, id, "Flange")
+    validate_flange_holes(od, pcd, hole_dia)
     result = cq.Workplane("XY").circle(od/2).extrude(thickness)
     result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
-    result = result.faces(">Z").workplane().polarArray(pcd/2, 0, 360, holes).circle(hole_dia/2).cutThruAll()
+    result = result.faces(">Z").workplane().polarArray(pcd/2, 0, 360, int(holes)).circle(hole_dia/2).cutThruAll()
     return result
 
 def make_washer(od, id, thickness):
+    validate_positive(("od", od), ("id", id), ("thickness", thickness))
+    validate_hollow(od, id, "Washer")
     result = cq.Workplane("XY").circle(od/2).extrude(thickness)
     result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
     return result
 
 def make_hex_nut(af, thickness, hole_dia):
-    hexagon = cq.Workplane("XY").polygon(6, af).extrude(thickness)
-    result = hexagon.faces(">Z").workplane().circle(hole_dia/2).cutThruAll()
+    validate_positive(("af", af), ("thickness", thickness), ("hole_dia", hole_dia))
+    if hole_dia >= af:
+        raise ValueError(f"Hole diameter ({hole_dia}mm) must be smaller than across flats ({af}mm)")
+    result = cq.Workplane("XY").polygon(6, af).extrude(thickness)
+    result = result.faces(">Z").workplane().circle(hole_dia/2).cutThruAll()
     return result
 
 def make_pulley(od, width, bore):
+    validate_positive(("od", od), ("width", width), ("bore", bore))
+    if bore >= od:
+        raise ValueError(f"Bore ({bore}mm) must be smaller than outer diameter ({od}mm)")
     result = cq.Workplane("XY").circle(od/2).extrude(width)
     result = result.faces(">Z").workplane().circle(bore/2).cutThruAll()
     return result
 
-# ================== PART CLASSIFIER & DIMENSION PARSER ==================
+def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_id, thickness):
+    validate_positive(("length", length), ("big_end_od", big_end_od), ("small_end_od", small_end_od), ("thickness", thickness))
+    validate_hollow(big_end_od, big_end_id, "Big end")
+    validate_hollow(small_end_od, small_end_id, "Small end")
+    big_end = cq.Workplane("XY").circle(big_end_od/2).extrude(thickness)
+    big_end = big_end.faces(">Z").workplane().circle(big_end_id/2).cutThruAll()
+    small_end = cq.Workplane("XY").center(length, 0).circle(small_end_od/2).extrude(thickness)
+    small_end = small_end.faces(">Z").workplane().circle(small_end_id/2).cutThruAll()
+    rib = cq.Workplane("XY").box(length, thickness, thickness).translate((length/2, 0, thickness/2))
+    result = big_end.union(small_end).union(rib)
+    return result
+
+def make_spur_gear(module, teeth, width, bore=0):
+    validate_positive(("module", module), ("teeth", teeth), ("width", width))
+    gear = SpurGear(module=module, teeth_number=int(teeth), width=width)
+    result = gear.build()
+    if bore > 0:
+        pitch_diameter = module * teeth
+        validate_gear_bore(pitch_diameter, bore)
+        result = result.faces(">Z").workplane().circle(bore/2).cutThruAll()
+    return result
+
+def make_ring_gear(module, teeth, width):
+    validate_positive(("module", module), ("teeth", teeth), ("width", width))
+    gear = RingGear(module=module, teeth_number=int(teeth), width=width)
+    return gear.build()
+
+def make_bevel_gear(module, teeth, width):
+    validate_positive(("module", module), ("teeth", teeth), ("width", width))
+    gear = BevelGear(module=module, teeth_number=int(teeth), width=width)
+    return gear.build()
+
+# ================== CLASSIFIER & PARSER ==================
 def classify_part(prompt):
     p = prompt.lower()
     for kw, part in PART_KEYWORDS.items():
@@ -116,10 +205,15 @@ def extract_dimensions(prompt):
     for key, pattern in DIMENSION_PATTERNS.items():
         match = re.search(pattern, p)
         if match:
-            if key in ["holes"]:
-                dims[key] = int(match.group(1))
-            else:
-                dims[key] = float(match.group(1))
+            dims[key] = int(match.group(1)) if key in ["holes", "teeth"] else float(match.group(1))
+    # handle "Xmm bore" pattern
+    bore_match = re.search(r"(\d+\.?\d*)\s*mm\s*bore", p)
+    if bore_match and "bore" not in dims:
+        dims["bore"] = float(bore_match.group(1))
+    # handle "X teeth" already covered but also "teeth: X"
+    teeth_match = re.search(r"(\d+)\s*teeth", p)
+    if teeth_match and "teeth" not in dims:
+        dims["teeth"] = int(teeth_match.group(1))
     return dims
 
 def fill_defaults(part, extracted):
@@ -127,42 +221,92 @@ def fill_defaults(part, extracted):
     final.update(extracted)
     return final
 
-# ================== GENERATOR ==================
-def generate_part(prompt):
+# ================== TEMPLATE DISPATCHER ==================
+def generate_from_template(prompt):
     part = classify_part(prompt)
     if not part:
-        return None, "Part type not recognized"
+        return None, "No template match"
 
     dims = extract_dimensions(prompt)
-    params = fill_defaults(part, dims)
+    p = fill_defaults(part, dims)
 
-    if part == "cuboid":
-        return make_cuboid(params["length"], params["width"], params["height"]), None
-    elif part == "hollow_cylinder":
-        return make_hollow_cylinder(params["od"], params["id"], params["height"]), None
-    elif part == "shaft":
-        return make_shaft(params["length"], params["diameter"]), None
-    elif part == "flange":
-        return make_flange(params["od"], params["id"], params["thickness"]), None
-    elif part == "flange_holes":
-        return make_flange_with_holes(params["od"], params["id"], params["thickness"], params["pcd"], params["holes"], params["hole_dia"]), None
-    elif part == "washer":
-        return make_washer(params["od"], params["id"], params["thickness"]), None
-    elif part == "nut":
-        return make_hex_nut(params["af"], params["thickness"], params["hole_dia"]), None
-    elif part == "pulley":
-        return make_pulley(params["od"], params["width"], params["bore"]), None
-    return None, "Part template not implemented"
+    try:
+        if part == "cuboid":
+            return make_cuboid(p["length"], p["width"], p["height"]), None
+        elif part == "hollow_cylinder":
+            return make_hollow_cylinder(p["od"], p["id"], p["height"]), None
+        elif part == "shaft":
+            return make_shaft(p["length"], p["diameter"]), None
+        elif part == "flange":
+            return make_flange(p["od"], p["id"], p["thickness"]), None
+        elif part == "flange_holes":
+            return make_flange_with_holes(p["od"], p["id"], p["thickness"], p["pcd"], p["holes"], p["hole_dia"]), None
+        elif part == "washer":
+            return make_washer(p["od"], p["id"], p["thickness"]), None
+        elif part == "nut":
+            return make_hex_nut(p["af"], p["thickness"], p["hole_dia"]), None
+        elif part == "pulley":
+            return make_pulley(p["od"], p["width"], p["bore"]), None
+        elif part == "connecting_rod":
+            return make_connecting_rod(p["length"], p["big_end_od"], p["big_end_id"], p["small_end_od"], p["small_end_id"], p["thickness"]), None
+        elif part in ["spur_gear", "spur_gear_with_bore"]:
+            return make_spur_gear(p["module"], p["teeth"], p["width"], p.get("bore", 0)), None
+        elif part == "ring_gear":
+            return make_ring_gear(p["module"], p["teeth"], p["width"]), None
+        elif part == "bevel_gear":
+            return make_bevel_gear(p["module"], p["teeth"], p["width"]), None
+        else:
+            return None, "Template not implemented"
+    except Exception as e:
+        return None, str(e)
 
-# ================== CONNECTING ROD TEMPLATE ==================
-def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_id, thickness):
-    big_end = cq.Workplane("XY").circle(big_end_od/2).extrude(thickness)
-    big_end = big_end.faces(">Z").workplane().circle(big_end_id/2).cutThruAll()
-    small_end = cq.Workplane("XY").center(length, 0).circle(small_end_od/2).extrude(thickness)
-    small_end = small_end.faces(">Z").workplane().circle(small_end_id/2).cutThruAll()
-    rib = cq.Workplane("XY").box(length, thickness, thickness).translate((length/2, 0, thickness/2))
-    result = big_end.union(small_end).union(rib)
-    return result
+# ================== AI FALLBACK ==================
+def generate_with_ai(prompt, error=None):
+    error_context = f"\nPrevious error: {error}\nFix it." if error else ""
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": f"""
+You are a CadQuery expert. Write Python code using CadQuery to build this part:
+{prompt}
+{error_context}
+
+Rules:
+- Start with: import cadquery as cq
+- Store final shape in variable called 'result'
+- Do NOT use import_cadquery() or any other import
+- Do NOT export, show, or add input()
+- Return ONLY Python code, no explanation, no backticks, no markdown
+
+Available:
+- cadquery as cq
+- from cq_gears import SpurGear, RingGear, BevelGear
+- SpurGear(module=2, teeth_number=20, width=30).build()
+
+Example:
+import cadquery as cq
+result = cq.Workplane("XY").circle(50).extrude(20)
+result = result.faces(">Z").workplane().circle(25).cutThruAll()
+result = result.faces(">Z").workplane().polarArray(40, 0, 360, 6).circle(5).cutThruAll()
+"""}]
+    )
+    return response.choices[0].message.content
+
+def run_ai_with_retry(prompt):
+    error = None
+    for attempt in range(3):
+        code = generate_with_ai(prompt, error)
+        try:
+            exec_globals = {
+                "cq": cq,
+                "SpurGear": SpurGear,
+                "RingGear": RingGear,
+                "BevelGear": BevelGear,
+            }
+            exec(code, exec_globals)
+            return exec_globals["result"], None
+        except Exception as e:
+            error = str(e)
+    return None, f"AI failed after 3 attempts: {error}"
 
 # ================== GENERATE ROUTE ==================
 @app.route('/generate', methods=['POST'])
@@ -170,12 +314,24 @@ def generate():
     data = request.json
     prompt = data.get("prompt", "")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    error_msg = None
+    step_path = None
+    stl_path = None
+    step_b64 = None
+    stl_b64 = None
+    status = "failed"
+    method = None
 
-    # Generate CAD
     try:
-        result, error_msg = generate_part(prompt)
+        result, err = generate_from_template(prompt)
+        if result:
+            method = "template"
+        else:
+            result, err = run_ai_with_retry(prompt)
+            method = "ai"
+
         if not result:
-            raise ValueError(error_msg)
+            raise ValueError(err)
 
         os.makedirs("outputs", exist_ok=True)
         step_path = f"outputs/part_{timestamp}.step"
@@ -183,37 +339,34 @@ def generate():
         cq.exporters.export(result, step_path)
         cq.exporters.export(result, stl_path)
 
-        # Encode for API
         with open(step_path, "rb") as f:
             step_b64 = base64.b64encode(f.read()).decode("utf-8")
         with open(stl_path, "rb") as f:
             stl_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         status = "success"
+
     except Exception as e:
-        step_b64, stl_b64 = None, None
-        status = "failed"
         error_msg = str(e)
 
-    # ========== LOGGING ==========
-    log_entry = {
-        "timestamp": timestamp,
-        "prompt": prompt,
-        "status": status,
-        "error": error_msg if status=="failed" else None,
-        "output": {"step_file": step_path if status=="success" else None,
-                   "stl_file": stl_path if status=="success" else None}
-    }
+    # ================== LOGGING ==================
     os.makedirs("logs", exist_ok=True)
     with open(f"logs/log_{timestamp}.json", "w") as f:
-        json.dump(log_entry, f, indent=2)
+        json.dump({
+            "timestamp": timestamp,
+            "prompt": prompt,
+            "status": status,
+            "method": method,
+            "error": error_msg,
+            "step_file": step_path,
+            "stl_file": stl_path
+        }, f, indent=2)
 
-    # ========== RESPONSE ==========
     return jsonify({
         "step_b64": step_b64,
         "stl_b64": stl_b64,
         "status": status,
-        "error": error_msg if status=="failed" else None
+        "error": error_msg
     })
 
 # ================== MAIN ==================
