@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import cadquery as cq
-from groq import Groq  # AI fallback
+from groq import Groq
 
 # ================== ENV ==================
 load_dotenv()
@@ -19,7 +19,7 @@ from cq_gears import SpurGear, RingGear, BevelGear
 
 # ================== APP ==================
 app = Flask(__name__)
-CORS(app, origins="*")  # Allow any origin
+CORS(app, origins="*")
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
@@ -108,6 +108,24 @@ def make_cuboid(length, width, height):
     validate_positive(("length", length), ("width", width), ("height", height))
     return cq.Workplane("XY").box(length, width, height)
 
+def make_hollow_cylinder(od, id, height):
+    validate_positive(("od", od), ("id", id), ("height", height))
+    validate_hollow(od, id, "Hollow cylinder")
+    result = cq.Workplane("XY").circle(od/2).extrude(height)
+    result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
+    return result
+
+def make_shaft(length, diameter):
+    validate_positive(("length", length), ("diameter", diameter))
+    return cq.Workplane("XY").circle(diameter/2).extrude(length)
+
+def make_flange(od, id, thickness):
+    validate_positive(("od", od), ("id", id), ("thickness", thickness))
+    validate_hollow(od, id, "Flange")
+    result = cq.Workplane("XY").circle(od/2).extrude(thickness)
+    result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
+    return result
+
 def make_flange_with_holes(od, id, thickness, pcd, holes, hole_dia):
     validate_positive(("od", od), ("id", id), ("thickness", thickness), ("pcd", pcd), ("holes", holes), ("hole_dia", hole_dia))
     validate_hollow(od, id, "Flange")
@@ -115,6 +133,52 @@ def make_flange_with_holes(od, id, thickness, pcd, holes, hole_dia):
     result = cq.Workplane("XY").circle(od/2).extrude(thickness)
     result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
     result = result.faces(">Z").workplane().polarArray(pcd/2, 0, 360, int(holes)).circle(hole_dia/2).cutThruAll()
+    return result
+
+def make_washer(od, id, thickness):
+    validate_positive(("od", od), ("id", id), ("thickness", thickness))
+    validate_hollow(od, id, "Washer")
+    result = cq.Workplane("XY").circle(od/2).extrude(thickness)
+    result = result.faces(">Z").workplane().circle(id/2).cutThruAll()
+    return result
+
+def make_hex_nut(af, thickness, hole_dia):
+    validate_positive(("af", af), ("thickness", thickness), ("hole_dia", hole_dia))
+    if hole_dia >= af:
+        raise ValueError(f"Hole diameter ({hole_dia}mm) must be smaller than across flats ({af}mm)")
+    import math
+    radius = af / math.sqrt(3)  # across flats -> circumcircle radius
+    result = cq.Workplane("XY").polygon(6, radius).extrude(thickness)
+    result = result.faces(">Z").workplane().circle(hole_dia/2).cutThruAll()
+    return result
+
+def make_pulley(od, width, bore):
+    validate_positive(("od", od), ("width", width), ("bore", bore))
+    if bore >= od:
+        raise ValueError(f"Bore ({bore}mm) must be smaller than outer diameter ({od}mm)")
+    result = cq.Workplane("XY").circle(od/2).extrude(width)
+    result = result.faces(">Z").workplane().circle(bore/2).cutThruAll()
+    return result
+
+def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_id, thickness):
+    validate_positive(("length", length), ("big_end_od", big_end_od), ("small_end_od", small_end_od), ("thickness", thickness))
+    validate_hollow(big_end_od, big_end_id, "Big end")
+    validate_hollow(small_end_od, small_end_id, "Small end")
+    
+    # Big end
+    big_end = cq.Workplane("XY").circle(big_end_od/2).extrude(thickness)
+    big_end = big_end.faces(">Z").workplane().circle(big_end_id/2).cutThruAll()
+    
+    # Small end
+    small_end = cq.Workplane("XY").center(length, 0).circle(small_end_od/2).extrude(thickness)
+    small_end = small_end.faces(">Z").workplane().circle(small_end_id/2).cutThruAll()
+    
+    # Rib
+    rib_length = length - big_end_od/2 - small_end_od/2
+    rib = cq.Workplane("XY").box(rib_length, thickness/2, thickness/2)
+    rib = rib.translate((big_end_od/2 + rib_length/2, 0, thickness/2))
+    
+    result = big_end.union(small_end).union(rib)
     return result
 
 def make_spur_gear(module, teeth, width, bore=0):
@@ -125,6 +189,16 @@ def make_spur_gear(module, teeth, width, bore=0):
         gear = SpurGear(module=module, teeth_number=int(teeth), width=width, bore_d=bore)
     else:
         gear = SpurGear(module=module, teeth_number=int(teeth), width=width)
+    return gear.build()
+
+def make_ring_gear(module, teeth, width):
+    validate_positive(("module", module), ("teeth", teeth), ("width", width))
+    gear = RingGear(module=module, teeth_number=int(teeth), width=width)
+    return gear.build()
+
+def make_bevel_gear(module, teeth, width):
+    validate_positive(("module", module), ("teeth", teeth), ("width", width))
+    gear = BevelGear(module=module, teeth_number=int(teeth), width=width)
     return gear.build()
 
 # ================== CLASSIFIER & PARSER ==================
@@ -155,6 +229,7 @@ def fill_defaults(part, extracted):
     final.update(extracted)
     return final
 
+# ================== TEMPLATE DISPATCHER ==================
 def generate_from_template(prompt):
     part = classify_part(prompt)
     if not part:
@@ -166,10 +241,28 @@ def generate_from_template(prompt):
     try:
         if part == "cuboid":
             return make_cuboid(p["length"], p["width"], p["height"]), None
+        elif part == "hollow_cylinder":
+            return make_hollow_cylinder(p["od"], p["id"], p["height"]), None
+        elif part == "shaft":
+            return make_shaft(p["length"], p["diameter"]), None
+        elif part == "flange":
+            return make_flange(p["od"], p["id"], p["thickness"]), None
         elif part == "flange_holes":
             return make_flange_with_holes(p["od"], p["id"], p["thickness"], p["pcd"], p["holes"], p["hole_dia"]), None
+        elif part == "washer":
+            return make_washer(p["od"], p["id"], p["thickness"]), None
+        elif part == "nut":
+            return make_hex_nut(p["af"], p["thickness"], p["hole_dia"]), None
+        elif part == "pulley":
+            return make_pulley(p["od"], p["width"], p["bore"]), None
+        elif part == "connecting_rod":
+            return make_connecting_rod(p["length"], p["big_end_od"], p["big_end_id"], p["small_end_od"], p["small_end_id"], p["thickness"]), None
         elif part == "spur_gear":
             return make_spur_gear(p["module"], p["teeth"], p["width"], p.get("bore", 0)), None
+        elif part == "ring_gear":
+            return make_ring_gear(p["module"], p["teeth"], p["width"]), None
+        elif part == "bevel_gear":
+            return make_bevel_gear(p["module"], p["teeth"], p["width"]), None
         else:
             return None, "Template not implemented"
     except Exception as e:
@@ -205,7 +298,12 @@ def run_ai_with_retry(prompt):
     for attempt in range(3):
         code = generate_with_ai(prompt, error)
         try:
-            exec_globals = {"cq": cq, "SpurGear": SpurGear, "RingGear": RingGear, "BevelGear": BevelGear}
+            exec_globals = {
+                "cq": cq,
+                "SpurGear": SpurGear,
+                "RingGear": RingGear,
+                "BevelGear": BevelGear,
+            }
             exec(code, exec_globals)
             return exec_globals["result"], None
         except Exception as e:
@@ -219,16 +317,20 @@ def generate():
     prompt = data.get("prompt", "")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     error_msg = None
+    step_path = None
+    stl_path = None
     step_b64 = None
     stl_b64 = None
     status = "failed"
     method = None
 
     try:
+        # FIRST, try template
         result, err = generate_from_template(prompt)
         if result:
             method = "template"
         else:
+            # SECOND, fallback to AI
             result, err = run_ai_with_retry(prompt)
             method = "ai"
 
@@ -238,9 +340,13 @@ def generate():
         os.makedirs("outputs", exist_ok=True)
         step_path = f"outputs/part_{timestamp}.step"
         stl_path = f"outputs/part_{timestamp}.stl"
+
+        # Export STEP
         cq.exporters.export(result, step_path)
+        # Export STL
         cq.exporters.export(result, stl_path)
 
+        # Read files as base64
         with open(step_path, "rb") as f:
             step_b64 = base64.b64encode(f.read()).decode("utf-8")
         with open(stl_path, "rb") as f:
@@ -252,14 +358,14 @@ def generate():
         error_msg = str(e)
 
     return jsonify({
-        "step_b64": step_b64,
-        "stl_b64": stl_b64,
         "status": status,
+        "method": method,
         "error": error_msg,
-        "method": method
+        "step_file": step_b64,
+        "stl_file": stl_b64,
+        "timestamp": timestamp
     })
 
-# ================== MAIN ==================
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000, debug=True)
