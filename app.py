@@ -358,14 +358,14 @@ def generate():
         error_msg = str(e)
 
     return jsonify({
-        "status": status,
-        "method": method,
-        "error": error_msg,
-        "step_file": step_b64,
-        "stl_file": stl_b64,
-        "timestamp": timestamp
-    })
+    "status": status,
+    "method": method,
+    "error": error_msg,
+    "step_b64": step_b64,   # ✅ correct
+    "stl_b64": stl_b64,     # ✅ correct
+    "timestamp": timestamp
+})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
