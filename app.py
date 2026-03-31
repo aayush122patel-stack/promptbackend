@@ -35,7 +35,6 @@ DEFAULTS = {
     "pulley": {"od": 80, "width": 30, "bore": 20},
     "connecting_rod": {"length": 200, "big_end_od": 30, "big_end_id": 15, "small_end_od": 20, "small_end_id": 10, "thickness": 10},
     "spur_gear": {"module": 2, "teeth": 20, "width": 30, "bore": 0},
-    "spur_gear_with_bore": {"module": 2, "teeth": 20, "width": 30, "bore": 20},
     "ring_gear": {"module": 2, "teeth": 40, "width": 30},
     "bevel_gear": {"module": 2, "teeth": 20, "width": 20},
 }
@@ -46,10 +45,10 @@ PART_KEYWORDS = {
     "ring gear": "ring_gear",
     "bevel gear": "bevel_gear",
     "spur gear": "spur_gear",
-    "gear with bore": "spur_gear_with_bore",
-    "gear with hole": "spur_gear_with_bore",
-    "mechanical gear": "spur_gear_with_bore",
-    "gear": "spur_gear_with_bore",
+    "mechanical gear": "spur_gear",
+    "gear with bore": "spur_gear",
+    "gear with hole": "spur_gear",
+    "gear": "spur_gear",
     "flange with holes": "flange_holes",
     "flange with bolt": "flange_holes",
     "flange": "flange",
@@ -76,7 +75,7 @@ DIMENSION_PATTERNS = {
     "hole_dia": r"(?:hole\s*diameter|hole\s*dia)\s*[:=]?\s*(\d+\.?\d*)",
     "af": r"(?:across\s*flats|af)\s*[:=]?\s*(\d+\.?\d*)",
     "width": r"(?:width|wide)\s*[:=]?\s*(\d+\.?\d*)",
-    "bore": r"(?:bore|inner\s*hole|bore\s*diameter)\s*[:=]?\s*(\d+\.?\d*)",
+    "bore": r"(\d+\.?\d*)\s*mm\s*bore|(?:bore|bore\s*diameter|bore\s*dia)\s*[:=]?\s*(\d+\.?\d*)",
     "height": r"(?:height|tall)\s*[:=]?\s*(\d+\.?\d*)",
     "big_end_od": r"big\s*end\s*(?:od|outer|diameter)\s*[:=]?\s*(\d+\.?\d*)",
     "big_end_id": r"big\s*end\s*(?:id|inner|bore)\s*[:=]?\s*(\d+\.?\d*)",
@@ -100,9 +99,9 @@ def validate_flange_holes(od, pcd, hole_dia):
     if pcd/2 + hole_dia/2 >= od/2:
         raise ValueError(f"Bolt holes extend beyond flange outer diameter. Reduce PCD or hole diameter.")
 
-def validate_gear_bore(gear_od, bore):
-    if bore > 0 and bore >= gear_od:
-        raise ValueError(f"Bore diameter ({bore}mm) must be smaller than gear outer diameter ({gear_od}mm)")
+def validate_gear_bore(pitch_diameter, bore):
+    if bore > 0 and bore >= pitch_diameter:
+        raise ValueError(f"Bore diameter ({bore}mm) must be smaller than gear pitch diameter ({pitch_diameter}mm)")
 
 # ================== TEMPLATE FUNCTIONS ==================
 def make_cuboid(length, width, height):
@@ -173,13 +172,13 @@ def make_connecting_rod(length, big_end_od, big_end_id, small_end_od, small_end_
 
 def make_spur_gear(module, teeth, width, bore=0):
     validate_positive(("module", module), ("teeth", teeth), ("width", width))
-    gear = SpurGear(module=module, teeth_number=int(teeth), width=width)
-    result = gear.build()
+    pitch_diameter = module * teeth
     if bore > 0:
-        pitch_diameter = module * teeth
         validate_gear_bore(pitch_diameter, bore)
-        result = result.faces(">Z").workplane().circle(bore/2).cutThruAll()
-    return result
+        gear = SpurGear(module=module, teeth_number=int(teeth), width=width, bore_d=bore)
+    else:
+        gear = SpurGear(module=module, teeth_number=int(teeth), width=width)
+    return gear.build()
 
 def make_ring_gear(module, teeth, width):
     validate_positive(("module", module), ("teeth", teeth), ("width", width))
@@ -205,15 +204,13 @@ def extract_dimensions(prompt):
     for key, pattern in DIMENSION_PATTERNS.items():
         match = re.search(pattern, p)
         if match:
-            dims[key] = int(match.group(1)) if key in ["holes", "teeth"] else float(match.group(1))
-    # handle "Xmm bore" pattern
-    bore_match = re.search(r"(\d+\.?\d*)\s*mm\s*bore", p)
-    if bore_match and "bore" not in dims:
-        dims["bore"] = float(bore_match.group(1))
-    # handle "X teeth" already covered but also "teeth: X"
-    teeth_match = re.search(r"(\d+)\s*teeth", p)
-    if teeth_match and "teeth" not in dims:
-        dims["teeth"] = int(teeth_match.group(1))
+            if key == "bore":
+                val = match.group(1) or match.group(2)
+                dims[key] = float(val)
+            elif key in ["holes", "teeth"]:
+                dims[key] = int(match.group(1))
+            else:
+                dims[key] = float(match.group(1))
     return dims
 
 def fill_defaults(part, extracted):
@@ -249,7 +246,7 @@ def generate_from_template(prompt):
             return make_pulley(p["od"], p["width"], p["bore"]), None
         elif part == "connecting_rod":
             return make_connecting_rod(p["length"], p["big_end_od"], p["big_end_id"], p["small_end_od"], p["small_end_id"], p["thickness"]), None
-        elif part in ["spur_gear", "spur_gear_with_bore"]:
+        elif part == "spur_gear":
             return make_spur_gear(p["module"], p["teeth"], p["width"], p.get("bore", 0)), None
         elif part == "ring_gear":
             return make_ring_gear(p["module"], p["teeth"], p["width"]), None
@@ -280,7 +277,7 @@ Rules:
 Available:
 - cadquery as cq
 - from cq_gears import SpurGear, RingGear, BevelGear
-- SpurGear(module=2, teeth_number=20, width=30).build()
+- SpurGear(module=2, teeth_number=20, width=30, bore_d=20).build()
 
 Example:
 import cadquery as cq
@@ -349,7 +346,6 @@ def generate():
     except Exception as e:
         error_msg = str(e)
 
-    # ================== LOGGING ==================
     os.makedirs("logs", exist_ok=True)
     with open(f"logs/log_{timestamp}.json", "w") as f:
         json.dump({
