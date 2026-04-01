@@ -25,6 +25,7 @@ client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # ================== DEFAULTS ==================
 DEFAULTS = {
+    "cylinder": {"radius": 25, "height": 100},
     "cuboid": {"length": 100, "width": 60, "height": 40},
     "hollow_cylinder": {"od": 50, "id": 30, "height": 100},
     "shaft": {"diameter": 20, "length": 100},
@@ -40,6 +41,9 @@ DEFAULTS = {
 }
 
 PART_KEYWORDS = {
+    "cylinder": "cylinder",
+    "solid cylinder": "cylinder",
+    "boss": "cylinder",
     "connecting rod": "connecting_rod",
     "conrod": "connecting_rod",
     "ring gear": "ring_gear",
@@ -65,6 +69,7 @@ PART_KEYWORDS = {
 }
 
 DIMENSION_PATTERNS = {
+    "radius": r"(?:radius|r)\s*[:=]?\s*(\d+\.?\d*)",
     "od": r"(?:outer\s*diameter|od)\s*[:=]?\s*(\d+\.?\d*)",
     "id": r"(?:inner\s*diameter|id)\s*[:=]?\s*(\d+\.?\d*)",
     "diameter": r"(?:diameter|dia)\s*[:=]?\s*(\d+\.?\d*)",
@@ -104,6 +109,10 @@ def validate_gear_bore(pitch_diameter, bore):
         raise ValueError(f"Bore diameter ({bore}mm) must be smaller than gear pitch diameter ({pitch_diameter}mm)")
 
 # ================== TEMPLATE FUNCTIONS ==================
+def make_cylinder(radius, height):
+    validate_positive(("radius", radius), ("height", height))
+    return cq.Workplane("XY").circle(radius).extrude(height)
+    
 def make_cuboid(length, width, height):
     validate_positive(("length", length), ("width", width), ("height", height))
     return cq.Workplane("XY").box(length, width, height)
@@ -247,6 +256,8 @@ def generate_from_template(prompt):
             return make_shaft(p["length"], p["diameter"]), None
         elif part == "flange":
             return make_flange(p["od"], p["id"], p["thickness"]), None
+        elif part == "cylinder":
+            return make_cylinder(p["radius"], p["height"]), None
         elif part == "flange_holes":
             return make_flange_with_holes(p["od"], p["id"], p["thickness"], p["pcd"], p["holes"], p["hole_dia"]), None
         elif part == "washer":
